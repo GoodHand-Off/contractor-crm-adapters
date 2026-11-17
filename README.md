@@ -1,10 +1,10 @@
-# contractor-crm-adapters
+# contractor-crm-adapters: JobNimbus API and AccuLynx API clients
 
-Typed TypeScript clients for **JobNimbus** and **AccuLynx**, two CRMs used by
-roofing and home-improvement contractors. One normalized contact shape, an
-injectable `fetch`, timeouts, paging within each vendor's documented limits,
-and typed errors. For developers and agencies who build integrations for
-contractors.
+Typed Node.js and TypeScript clients for the **JobNimbus API** and the
+**AccuLynx API**, two CRMs used by roofing and home-improvement contractors.
+One normalized contact shape, an injectable `fetch`, timeouts, paging within
+each vendor's documented limits, and typed errors. For developers and agencies
+who build integrations for contractors.
 
 There is no hosted demo; this is a library. Every test runs against a mocked
 `fetch`, so `test/` shows exactly what goes over the wire.
@@ -61,7 +61,7 @@ contractor's API key. The client refuses to start in a browser unless you pass
 `dangerouslyAllowBrowser: true`. The key is kept in an ES private field, so
 logging or serializing a client never shows it.
 
-## What you can do
+## What you can do with each API
 
 | | JobNimbus | AccuLynx |
 | --- | --- | --- |
@@ -329,6 +329,10 @@ what the client does.
 
 Found a mismatch? Open an issue with a link to the vendor doc page.
 
+For what JobNimbus's API, automations and Zapier connector can and can't do,
+in plain terms, see our
+[JobNimbus automation guide](https://goodhandoff.com/blog/jobnimbus-automation-integration?utm_source=github&utm_medium=readme&utm_campaign=contractor-crm-adapters&utm_content=guide#api).
+
 ## Example script
 
 `examples/rep-report.mjs` is a read-only report: records per status and the
@@ -363,9 +367,18 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). JobNimbus and AccuLynx
 are trademarks of their owners, and this project is not affiliated with either.
 See [TRADEMARKS.md](TRADEMARKS.md).
 
----
+## Why we give this away
 
-**Built by GoodHandoff.** We build and run the automation that carries a home
-service job from the first call to the final payment, inside the CRM, phone and
-texting tools the contractor already uses:
-[goodhandoff.com](https://goodhandoff.com/?utm_source=github&utm_medium=readme&utm_campaign=contractor-crm-adapters).
+An AI can draft an API client in an afternoon now. That was never the hard
+part of connecting a contractor's CRM. The hard part is deciding which fields
+the office actually trusts, whose version wins when two systems disagree, and
+who notices when a JobNimbus key expires on a Saturday. That's the work we do,
+so we publish the client and keep the work.
+
+The code is free. The handoff is the work.
+
+**GoodHandoff** builds and runs the automation that carries a home service job
+from the first call to the final payment, inside the CRM, phone and texting
+tools a company already uses. If you'd rather have a JobNimbus or AccuLynx
+integration built and kept running for you, that's
+[what we do](https://goodhandoff.com/services/crm-integration?utm_source=github&utm_medium=readme&utm_campaign=contractor-crm-adapters&utm_content=footer#jobnimbus).
