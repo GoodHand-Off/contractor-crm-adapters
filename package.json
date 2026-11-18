@@ -12,13 +12,13 @@
     "api-client",
     "typescript"
   ],
-  "homepage": "https://github.com/nussbeck-labs/contractor-crm-adapters#readme",
+  "homepage": "https://github.com/GoodHand-Off/contractor-crm-adapters#readme",
   "bugs": {
-    "url": "https://github.com/nussbeck-labs/contractor-crm-adapters/issues"
+    "url": "https://github.com/GoodHand-Off/contractor-crm-adapters/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nussbeck-labs/contractor-crm-adapters.git"
+    "url": "git+https://github.com/GoodHand-Off/contractor-crm-adapters.git"
   },
   "license": "Apache-2.0",
   "author": "GoodHandoff (https://goodhandoff.com)",

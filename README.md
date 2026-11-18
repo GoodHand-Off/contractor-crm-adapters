@@ -15,7 +15,7 @@ In an empty folder (the package isn't on npm yet, so this installs it from
 GitHub; its `prepare` script builds it):
 
 ```bash
-npm install git+https://github.com/nussbeck-labs/contractor-crm-adapters.git
+npm install git+https://github.com/GoodHand-Off/contractor-crm-adapters.git
 ```
 
 Save this as `quickstart.mjs`:
