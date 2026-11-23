@@ -1,5 +1,5 @@
 import { inspect } from "node:util";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpClient, parseRateLimitReset, parseRetryAfter } from "../src/http.js";
 import {
   CrmAuthError,
@@ -453,6 +453,14 @@ describe("RateLimit-Reset, for providers that document it", () => {
     return new HttpClient("housecallpro", HCP_DEFAULTS, { apiKey: TEST_API_KEY, fetch, ...extra });
   }
 
+  // No jitter unless a test asks for it, so waits are exact.
+  beforeEach(() => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("sends the key with the provider's scheme", async () => {
     const { fetch, calls } = mockFetch(json({}));
     await hcpHttp(fetch).request("/things");
@@ -510,6 +518,39 @@ describe("RateLimit-Reset, for providers that document it", () => {
     expect(error).toBeInstanceOf(CrmRateLimitError);
     expect((error as CrmRateLimitError).retryAfterMs).toBe(120_000);
     expect(calls).toHaveLength(1);
+  });
+
+  it("measures the reset against the server's Date header, so a slow local clock doesn't stretch the wait", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now); // the local clock runs 90 s behind the server
+    const serverNow = new Date(now + 90_000).toUTCString();
+    const { fetch, calls } = mockFetch(text("", 429, { "ratelimit-reset": epoch(95), date: serverNow }), json({ ok: true }));
+    const pending = hcpHttp(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("falls back to the local clock when the Date header is unreadable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch } = mockFetch(text("", 429, { "ratelimit-reset": epoch(2), date: "yesterday" }), json({ ok: true }));
+    const pending = hcpHttp(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("adds up to a second of jitter, so clients sharing a key spread their retries", async () => {
+    vi.mocked(Math.random).mockReturnValue(0.75);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch, calls } = mockFetch(text("", 429, { "ratelimit-reset": epoch(2) }), json({ ok: true }));
+    const pending = hcpHttp(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(2_749);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ ok: true });
   });
 
   it("treats a 503 with RateLimit-Reset as a rate limit", async () => {

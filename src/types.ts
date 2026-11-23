@@ -131,7 +131,7 @@ interface CrmRecordPayloadBase {
   description?: string | undefined;
   /** Provider user ID of the sales rep to assign (Housecall Pro: an employee ID, on jobs only). */
   assignedRepExternalId?: string | undefined;
-  /** Sales rep display name, for providers that store it alongside the ID (JobNimbus). Others ignore it. */
+  /** Sales rep display name, for providers that store it alongside the ID (JobNimbus). Housecall Pro ignores it next to an ID and rejects it without one. */
   assignedRepName?: string | undefined;
   /** Lead source name. JobNimbus requires one defined in the account. */
   sourceName?: string | undefined;
@@ -207,7 +207,7 @@ export interface CrmCapabilities {
   createContact: boolean;
   /** `createJob`. */
   createJob: boolean;
-  /** `createNote`. */
+  /** `createNote`. Housecall Pro takes job IDs only. */
   createNote: boolean;
   /** `listNotes`. */
   listNotes: boolean;

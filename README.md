@@ -71,7 +71,7 @@ logging or serializing a client never shows it.
 | `createContact()` | `POST /contacts` | not supported (read-only) | `POST /customers` |
 | `createJob()` | `POST /jobs`, linked to a contact | not supported (read-only) | `POST /jobs` for a customer, at one of its addresses |
 | `createNote()` | `POST /activities` as a "Note" | not supported (read-only) | `POST /jobs/{job_id}/notes`, jobs only |
-| `listNotes()` | `GET /activities` filtered on `related.id` | not supported (no documented read endpoint) | not supported (no documented read endpoint) |
+| `listNotes()` | `GET /activities` filtered on `related.id` | not supported (no documented read endpoint) | not supported (no endpoint lists notes with dates) |
 
 `client.capabilities` tells you which methods a client supports. Calling an
 unsupported method rejects with `CrmUnsupportedError` and sends nothing.
@@ -142,13 +142,19 @@ await hcp.createNote(job.externalId, "Homeowner asked for a Saturday inspection.
 
 Housecall Pro puts every job at one of the customer's addresses. Without
 `address`, `createJob` uses the customer's only address, and creates nothing if
-the customer has none or several. With `address`, it uses the customer's
-address with the same street and zip (ignoring case and punctuation), or adds
-it to the customer first; adding one takes street, city, state, zip and
-country. Fields Housecall Pro has no place for, such as a job `name` or
-JobNimbus's `recordTypeName`, are rejected with `CrmValidationError` rather
-than dropped. The one exception is `assignedRepName`, which every adapter
-ignores where the CRM stores no rep name.
+the customer has none or several. With `address` (street and zip at least), it
+uses the customer's address with the same street and zip, ignoring case,
+punctuation and a ZIP+4 suffix; a street without a unit refuses to guess
+between several units there. If nothing matches, it adds the address to the
+customer first, which takes street, city, state, zip and country. Should
+`POST /jobs` then fail, the added address stays on the customer, and the next
+`createJob` finds it rather than adding it twice.
+
+Notes go on jobs: `createNote` takes the ID `createJob` returns, not a customer
+ID from `listContacts`. Fields Housecall Pro has no place for, such as a job
+`name`, JobNimbus's `recordTypeName` or a rep name without a rep ID, are
+rejected with `CrmValidationError` rather than dropped. A rep name sent next to
+a rep ID is ignored, since Housecall Pro assigns employees by ID only.
 
 **Limits:** it cannot read notes back (Housecall Pro documents no endpoint for
 that), reads customers but not jobs, estimates or leads, sends no
@@ -272,13 +278,15 @@ reading as "no records".
 
 - AccuLynx clients space requests 100 ms apart by default, which is AccuLynx's
   documented 10 requests per second per key.
-- On HTTP 429 (or 503 with `Retry-After`) the client pauses every request it
-  is making, including ones already queued, for as long as the server asks.
-  It then retries the rejected request, at most twice by default (`maxRetries`,
-  0 to 10). Housecall Pro says when to come back in a `RateLimit-Reset`
-  header (the reset time, as an epoch timestamp), so its client waits for
-  that. A reset time already passed, as a clock running ahead would make it,
-  gets the 1 s, 2 s backoff instead of an instant retry.
+- On HTTP 429 (or a 503 that says when to come back) the client pauses every
+  request it is making, including ones already queued, for as long as the
+  server asks. It then retries the rejected request, at most twice by default
+  (`maxRetries`, 0 to 10). Housecall Pro says when to come back in a
+  `RateLimit-Reset` header (the reset time, as an epoch timestamp), so its
+  client waits for that, measured against the response's `Date` header so a
+  local clock that runs fast or slow doesn't matter, plus up to 1 s of jitter
+  so clients sharing a key don't retry in the same instant. A reset time
+  already passed gets the 1 s, 2 s backoff instead of an instant retry.
 - If the server asks for a longer pause than `maxRetryDelayMs` (default 60 s),
   the client does not sleep. It throws `CrmRateLimitError` with `retryAfterMs`
   set, and keeps failing fast until the pause is over, so your job queue can
@@ -396,13 +404,21 @@ are silent or ambiguous, this is what the client does.
 **Housecall Pro**
 
 - `GET /customers` documents a default `page_size` of 10 and no maximum. The
-  client asks for 100 by default (`pageSize` changes it) and stops at the
-  `total_pages` the response reports, so a server that pages smaller still
-  reads everything.
+  client asks for 100 by default, a value not checked against a live account;
+  if an account rejects it, pass a smaller `pageSize`. A larger one is sent as
+  given rather than capped at a guessed limit. Paging continues while either
+  `total_pages` or `total_items` says records remain, and ends at an empty
+  page, so a server that pages smaller than asked is still read to the end.
+- The addresses-list page (`GET /customers/{customer_id}/addresses`) shows its
+  body under the request and none under the 200 response. The client reads the
+  response in that shape (`page`, `total_pages`, `total_items`, `addresses`),
+  the one `GET /customers` documents, and throws `CrmResponseError` if the
+  `addresses` array is missing.
 - "Epoch format" for `RateLimit-Reset` doesn't say seconds or milliseconds.
   The client reads both, and reads a small number as seconds from now (the
   meaning IETF drafts of the RateLimit headers gave it), so no form is retried
-  at once.
+  at once. It measures an epoch reset against the response's `Date` header
+  when there is one.
 - `POST /jobs` needs an `address_id` and has no name or description field, so
   `createJob` finds or adds the address (see above), saves `description` as the
   job's notes and rejects `name`.
@@ -413,8 +429,10 @@ are silent or ambiguous, this is what the client does.
   `address` is the first service address, else the first address.
 - The date format of `created_at` and `updated_at` isn't stated. The client
   reads them only if they carry a time zone offset, like every other date here.
-- Notes exist on jobs only (`POST /jobs/{job_id}/notes`, text only). No
-  endpoint lists them with dates, so `listNotes` is unsupported.
+- Notes exist on jobs only (`POST /jobs/{job_id}/notes`, text only). The docs
+  don't say what a customer ID gets there, only that the path takes a job ID.
+  `GET /jobs/{id}` returns a job's notes as text with no dates or stated order,
+  so `listNotes` is unsupported.
 
 Found a mismatch? Open an issue with a link to the vendor doc page.
 
@@ -436,7 +454,9 @@ CRM_PROVIDER=jobnimbus CRM_API_KEY=your-key node examples/rep-report.mjs
 ```
 
 A missing or malformed `CRM_PROVIDER`, `CRM_API_KEY` or `CRM_MAX_RECORDS`
-(default 500) stops it with a message naming the variable.
+(default 500) stops it with a message naming the variable. Housecall Pro
+customers carry no status or sales rep, so with `CRM_PROVIDER=housecallpro`
+the report is one "(no status)" count.
 
 ## Development
 

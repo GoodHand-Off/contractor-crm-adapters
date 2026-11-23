@@ -33,13 +33,24 @@ compile-time change only; nothing that worked at runtime stops working.
   throws `CrmValidationError` naming the field. Code that reads these fields
   from a `CrmContactPayload` or `CrmJobPayload` now gets `string | undefined`.
 - `CrmProviderName` gains `"housecallpro"`, so an exhaustive `switch` over it
-  needs a new case.
+  needs a new case, and an object typed `Record<CrmProviderName, ...>` needs a
+  `housecallpro` key.
+- A value typed `CrmContactPayload` or `CrmJobPayload` no longer compiles as
+  the argument of `JobNimbusClient.createContact` or `createJob`; type it
+  `JobNimbusContactPayload` or `JobNimbusJobPayload`. A client from
+  `createCrmClient("jobnimbus", ...)` is a `CrmClient`, so it no longer checks
+  `recordTypeName` and `statusName` at compile time; use
+  `new JobNimbusClient(...)` to keep that check. JobNimbus still rejects a
+  missing one at runtime.
 
 ### Notes
 
 - `CrmValidationError` can now follow a read: Housecall Pro's `createJob` reads
   the customer's addresses before choosing one, and throws without writing
   anything if the choice is ambiguous.
+- Housecall Pro's `createJob` may add an address to the customer before
+  creating the job. If the job then fails, the address stays; a retry reuses
+  it.
 
 ## [0.1.0] - 2026-11-17
 

@@ -25,7 +25,7 @@ export interface FetchResponse {
   ok: boolean;
   /** HTTP status code. */
   status: number;
-  /** Response headers; the client reads `Retry-After`, and `RateLimit-Reset` for Housecall Pro. */
+  /** Response headers; the client reads `Retry-After`, and `RateLimit-Reset` and `Date` for Housecall Pro. */
   headers: { get(name: string): string | null };
   /** The response body as text. */
   text(): Promise<string>;

@@ -101,6 +101,8 @@ const DEFAULT_MAX_RETRIES = 2;
 const MAX_RETRIES_LIMIT = 10;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const FALLBACK_BACKOFF_MS = 1_000;
+/** Up to this much is added to a `RateLimit-Reset` wait, so clients sharing a key spread their retries. */
+const RESET_JITTER_MS = 1_000;
 const BODY_LIMIT = 2_000;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 /** The longest delay setTimeout supports (about 24.8 days); larger values would fire after 1 ms. */
@@ -218,14 +220,17 @@ export class HttpClient {
   /**
    * How long the server asked us to wait, in ms, or `undefined` if it did not
    * say. Providers that document `RateLimit-Reset` (Housecall Pro) are read
-   * from it first. A reset time that has already passed, as a clock running
-   * ahead of the server's would make it, counts as unsaid, so the retry backs
-   * off instead of firing at once.
+   * from it first, measured against the response's `Date` header when there is
+   * one, so a local clock that runs fast or slow does not change the wait. Up
+   * to 1 s of jitter is added, so clients that share a key do not all retry in
+   * the same instant. A reset time that has already passed counts as unsaid,
+   * so the retry backs off instead of firing at once.
    */
-  #serverWait(response: { retryAfter: string | null; rateLimitReset: string | null }): number | undefined {
+  #serverWait(response: { retryAfter: string | null; rateLimitReset: string | null; date: string | null }): number | undefined {
     if (this.#rateLimitReset) {
-      const resetMs = parseRateLimitReset(response.rateLimitReset);
-      if (resetMs !== undefined && resetMs > 0) return resetMs;
+      const serverNow = response.date === null ? Number.NaN : Date.parse(response.date);
+      const resetMs = parseRateLimitReset(response.rateLimitReset, Number.isNaN(serverNow) ? Date.now() : serverNow);
+      if (resetMs !== undefined && resetMs > 0) return resetMs + Math.floor(Math.random() * RESET_JITTER_MS);
     }
     return parseRetryAfter(response.retryAfter);
   }
@@ -261,7 +266,14 @@ export class HttpClient {
     init: { method: string; headers: Record<string, string>; body: string | undefined },
     path: string,
     signal: AbortSignal | undefined,
-  ): Promise<{ ok: boolean; status: number; retryAfter: string | null; rateLimitReset: string | null; text: string }> {
+  ): Promise<{
+    ok: boolean;
+    status: number;
+    retryAfter: string | null;
+    rateLimitReset: string | null;
+    date: string | null;
+    text: string;
+  }> {
     signal?.throwIfAborted();
     const controller = new AbortController();
     let timedOut = false;
@@ -282,6 +294,7 @@ export class HttpClient {
         status: response.status,
         retryAfter: response.headers.get("retry-after"),
         rateLimitReset: response.headers.get("ratelimit-reset"),
+        date: response.headers.get("date"),
         text,
       };
     } catch (error) {

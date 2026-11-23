@@ -36,7 +36,10 @@ const DEFAULT_PAGE_SIZE = 100;
 const ADDRESS_PAGE_SIZE = 100;
 const PROVIDER = "housecallpro" as const;
 
-/** What the Housecall Pro adapter supports: everything but reading notes, which the API has no endpoint for. */
+/**
+ * What the Housecall Pro adapter supports: everything but reading notes back,
+ * since no documented endpoint lists them with dates. Notes go on jobs only.
+ */
 export const HOUSECALLPRO_CAPABILITIES: Readonly<CrmCapabilities> = Object.freeze({
   listContacts: true,
   createContact: true,
@@ -104,8 +107,8 @@ export class HousecallProClient implements CrmClient {
 
   /**
    * Pages through `GET /customers` oldest first (`sort_by=created_at`,
-   * `sort_direction=asc`), 100 per request by default, until the reported
-   * `total_pages`.
+   * `sort_direction=asc`), 100 per request by default, until both the reported
+   * `total_pages` and `total_items` are reached or a page comes back empty.
    */
   async *iterateContacts(options: ListContactsOptions = {}): AsyncGenerator<CrmContact, ContactListEnd, undefined> {
     const { pageSize, maxRecords, mappings, includeDeleted } = readListOptions(PROVIDER, options, {
@@ -136,16 +139,19 @@ export class HousecallProClient implements CrmClient {
    * `email` or `phone`; Housecall Pro does not accept a company name alone.
    * `phone` is saved as the mobile number, `description` as the customer's
    * notes, `sourceName` as its lead source and `address` as its first address.
-   * Customers have no assigned employee, so `assignedRepExternalId` is
-   * rejected; pass it to {@link HousecallProClient.createJob} instead.
+   * Customers have no assigned employee, so `assignedRepExternalId` and
+   * `assignedRepName` are rejected; pass the employee ID to
+   * {@link HousecallProClient.createJob} instead.
    *
    * @returns The new customer's `id`.
    */
   async createContact(payload: CrmContactPayload, options: CallOptions = {}): Promise<{ externalId: string }> {
     const input = readPayload(payload);
     rejectJobNimbusOnly(input);
-    if (optionalString(PROVIDER, input.assignedRepExternalId, "assignedRepExternalId")) {
-      invalid(PROVIDER, "assignedRepExternalId: Housecall Pro customers have no assigned employee; pass it to createJob instead");
+    for (const field of ["assignedRepExternalId", "assignedRepName"]) {
+      if (optionalString(PROVIDER, input[field], field)) {
+        invalid(PROVIDER, `${field}: Housecall Pro customers have no assigned employee; pass the employee ID to createJob instead`);
+      }
     }
     const firstName = optionalString(PROVIDER, input.firstName, "firstName");
     const lastName = optionalString(PROVIDER, input.lastName, "lastName");
@@ -154,7 +160,7 @@ export class HousecallProClient implements CrmClient {
     if (!firstName && !lastName && !email && !phone) {
       invalid(PROVIDER, "createContact needs firstName, lastName, email or phone; Housecall Pro does not accept companyName alone");
     }
-    const address = readAddress(input.address, false);
+    const address = readAddress(input.address);
     const body = compact({
       first_name: firstName,
       last_name: lastName,
@@ -173,16 +179,26 @@ export class HousecallProClient implements CrmClient {
    * Housecall Pro needs the ID of one of that customer's addresses, so the
    * client first reads them (`GET /customers/{id}/addresses`):
    *
-   * - With `address`, it uses the customer's address with the same street and
-   *   zip (ignoring case, spaces and punctuation), or adds `address` to the
-   *   customer (`POST /customers/{id}/addresses`) when none matches. Adding one
-   *   takes street, city, state, zip and country, so all five are required.
+   * - With `address` (street and zip required), it uses the customer's address
+   *   with the same street and zip, ignoring case, spaces, punctuation and a
+   *   ZIP+4 suffix. A street without a unit matches an address with one,
+   *   unless the customer has several units there, which throws. When nothing
+   *   matches it adds `address` to the customer
+   *   (`POST /customers/{id}/addresses`), which takes street, city, state, zip
+   *   and country.
    * - Without `address`, it uses the customer's only address. If the customer
-   *   has none or several, it throws {@link CrmValidationError} and creates nothing.
+   *   has none or several, it throws.
+   *
+   * Those errors are {@link CrmValidationError}s, thrown before anything is
+   * written. If `POST /jobs` itself fails after an address was added, the
+   * address stays on the customer; calling `createJob` again finds it instead
+   * of adding it twice.
    *
    * `description` is saved as the job's notes, `assignedRepExternalId` as its
    * assigned employee, `sourceName` as its lead source. Jobs have no name, so
-   * `name` is rejected. Two or three requests in all.
+   * `name` is rejected, and `assignedRepName` is rejected without an
+   * `assignedRepExternalId`. Two to four requests, one more per extra 100
+   * addresses the customer has.
    *
    * @returns The new job's `id`, which {@link HousecallProClient.createNote} takes.
    */
@@ -193,8 +209,16 @@ export class HousecallProClient implements CrmClient {
     }
     rejectJobNimbusOnly(input);
     const customerId = requiredString(PROVIDER, input.primaryContactExternalId, "primaryContactExternalId");
-    const wanted = readAddress(input.address, true);
+    const wanted = readAddress(input.address);
+    for (const part of ["street", "zip"] as const) {
+      if (wanted && !wanted[part]) {
+        invalid(PROVIDER, `address.${part} is required: createJob finds the customer's address by street and zip`);
+      }
+    }
     const repId = optionalString(PROVIDER, input.assignedRepExternalId, "assignedRepExternalId");
+    if (!repId && optionalString(PROVIDER, input.assignedRepName, "assignedRepName")) {
+      invalid(PROVIDER, "assignedRepName needs assignedRepExternalId: Housecall Pro assigns employees by ID only");
+    }
     const fields = sharedFields(input);
 
     const addressId = await this.#addressFor(customerId, wanted, options.signal);
@@ -210,8 +234,9 @@ export class HousecallProClient implements CrmClient {
 
   /**
    * Adds a note to a job (`POST /jobs/{job_id}/notes`). Takes a job `id`, as
-   * {@link HousecallProClient.createJob} returns it: Housecall Pro documents
-   * notes on jobs only, so a customer ID fails with {@link CrmNotFoundError}.
+   * {@link HousecallProClient.createJob} returns it. Housecall Pro documents
+   * notes on jobs only, so a customer ID (what `listContacts` returns) fails
+   * with an HTTP error from Housecall Pro; the docs don't say which status.
    * `source` is rejected, since a Housecall Pro note has only its text.
    *
    * @returns The new note's `id`.
@@ -231,9 +256,10 @@ export class HousecallProClient implements CrmClient {
   }
 
   /**
-   * Not supported: Housecall Pro documents no endpoint that lists a job's or
-   * customer's notes with their dates. Rejects with {@link CrmUnsupportedError}
-   * without sending a request.
+   * Not supported: no documented endpoint lists a job's or customer's notes
+   * with dates (`GET /jobs/{id}` returns a job's notes as text only, in no
+   * stated order). Rejects with {@link CrmUnsupportedError} without sending a
+   * request.
    */
   readonly listNotes: CrmClient["listNotes"] = () => Promise.reject(new CrmUnsupportedError(PROVIDER, "listNotes"));
 
@@ -242,29 +268,52 @@ export class HousecallProClient implements CrmClient {
     const path = `/customers/${encodeURIComponent(customerId)}/addresses`;
     const route = "GET /customers/{customer_id}/addresses";
     const existing: PageItem[] = [];
-    for await (const { items } of this.#pages(path, "addresses", route, ADDRESS_PAGE_SIZE, signal)) existing.push(...items);
-
-    if (wanted) {
-      const match = existing.find(({ record }) => sameAddress(record, wanted));
-      if (match) return match.id;
-      const created = await this.#http.request<JsonObject>(path, { method: "POST", body: wanted, signal });
-      return requireId(created, "POST /customers/{customer_id}/addresses");
+    for await (const { items } of this.#pages(path, "addresses", route, ADDRESS_PAGE_SIZE, signal)) {
+      const exact = wanted && items.find(({ record }) => addressMatch(record, wanted) === "exact");
+      if (exact) return exact.id;
+      existing.push(...items);
+      if (!wanted && existing.length > 1) break;
     }
-    const [only] = existing;
-    if (existing.length === 1 && only) return only.id;
-    return invalid(
-      PROVIDER,
-      existing.length === 0
-        ? `createJob: customer ${customerId} has no address; pass address to add one`
-        : `createJob: customer ${customerId} has ${existing.length} addresses; pass address to choose one`,
-    );
+
+    if (!wanted) {
+      const [only] = existing;
+      if (existing.length === 1 && only) return only.id;
+      return invalid(
+        PROVIDER,
+        existing.length === 0
+          ? `createJob: customer ${customerId} has no address; pass address to add one`
+          : `createJob: customer ${customerId} has more than one address; pass address to choose one`,
+      );
+    }
+
+    // The street matched an address's first line, but that address has a unit the caller didn't give.
+    const sameStreet = existing.filter(({ record }) => addressMatch(record, wanted) === "street");
+    const units = new Set(sameStreet.map(({ record }) => comparable(stringFrom(record.street_line_2))));
+    const [first] = sameStreet;
+    if (first && units.size === 1) return first.id;
+    if (units.size > 1) {
+      invalid(PROVIDER, `createJob: customer ${customerId} has ${units.size} units at that street address; put the unit in address.street`);
+    }
+
+    const missing = (["city", "state", "country"] as const).filter((part) => !wanted[part]);
+    if (missing.length > 0) {
+      invalid(
+        PROVIDER,
+        `createJob: customer ${customerId} has no address matching that street and zip, and adding one also needs ` +
+          `${missing.map((part) => `address.${part}`).join(", ")} (Housecall Pro requires street, city, state, zip and country)`,
+      );
+    }
+    const created = await this.#http.request<JsonObject>(path, { method: "POST", body: wanted, signal });
+    return requireId(created, "POST /customers/{customer_id}/addresses");
   }
 
   /**
    * Read a documented page-numbered list, oldest first, one request per page.
-   * Stops at the reported `total_pages`, or at a short or empty page when it
-   * is missing. Records without an `id`, or already read, are dropped; a page
-   * holding nothing new while more are promised throws rather than looping.
+   * Keeps going while either `total_pages` or `total_items` says more remain,
+   * so a server that pages smaller than asked is still read to the end; stops
+   * at an empty page, or at a short one when both counts are missing. Records
+   * without an `id`, or already read, are dropped; a page holding nothing new
+   * while more are promised throws rather than looping.
    */
   async *#pages(
     path: string,
@@ -292,11 +341,16 @@ export class HousecallProClient implements CrmClient {
         items.push({ id, record });
       }
       const totalPages = numberFrom(objectFrom(data)?.total_pages);
-      const more = raw.length > 0 && (totalPages !== undefined ? page < totalPages : raw.length >= pageSize);
+      const totalItems = numberFrom(objectFrom(data)?.total_items);
+      const more =
+        raw.length > 0 &&
+        (totalPages === undefined && totalItems === undefined
+          ? raw.length >= pageSize
+          : (totalPages !== undefined && page < totalPages) || (totalItems !== undefined && seen.size < totalItems));
       if (more && items.length === 0) {
         throw new CrmResponseError(
           PROVIDER,
-          `Housecall Pro: ${route} page ${page} held only records already read, so paging stopped instead of looping.`,
+          `Housecall Pro: ${route} page ${page} held no new records with an id, so paging stopped instead of looping.`,
         );
       }
       yield { items, more };
@@ -331,8 +385,8 @@ function sharedFields(input: Record<string, unknown>): JsonObject {
   };
 }
 
-/** Validate `address`; with `complete`, require the five parts Housecall Pro needs to add an address to a customer. */
-function readAddress(value: unknown, complete: boolean): AddressBody | undefined {
+/** Validate `address`. An object with no non-blank part counts as no address. */
+function readAddress(value: unknown): AddressBody | undefined {
   const address = optionalObject(PROVIDER, value, "address");
   if (!address) return undefined;
   const fields: AddressBody = {
@@ -342,24 +396,26 @@ function readAddress(value: unknown, complete: boolean): AddressBody | undefined
     zip: optionalString(PROVIDER, address.zip, "address.zip"),
     country: optionalString(PROVIDER, address.country, "address.country"),
   };
-  if (complete) {
-    for (const [part, text] of Object.entries(fields)) {
-      if (!text) invalid(PROVIDER, `address.${part} is required: Housecall Pro needs street, city, state, zip and country to add an address`);
-    }
-  }
   return compact(fields);
 }
 
-/** Same street (line one, or both lines) and zip, ignoring case, spaces and punctuation. */
-function sameAddress(existing: JsonObject, wanted: AddressBody): boolean {
-  const line1 = stringFrom(existing.street);
-  const bothLines = [line1, stringFrom(existing.street_line_2)].filter(Boolean).join(", ");
+/**
+ * How an existing address compares with the wanted one, which has a street and
+ * zip: `"exact"` when both street lines together match the wanted street,
+ * `"street"` when only the first line does (the existing address has a unit
+ * the caller didn't give), else `undefined`. Zips must match too.
+ */
+function addressMatch(existing: JsonObject, wanted: AddressBody): "exact" | "street" | undefined {
+  if (zipKey(stringFrom(existing.zip)) !== zipKey(wanted.zip)) return undefined;
   const street = comparable(wanted.street);
-  return (
-    street !== "" &&
-    (comparable(line1) === street || comparable(bothLines) === street) &&
-    comparable(stringFrom(existing.zip)) === comparable(wanted.zip)
-  );
+  const line1 = stringFrom(existing.street);
+  if (comparable([line1, stringFrom(existing.street_line_2)].filter(Boolean).join(", ")) === street) return "exact";
+  return comparable(line1) === street ? "street" : undefined;
+}
+
+/** A US ZIP or ZIP+4 compares on its first five digits; anything else as {@link comparable} text. */
+function zipKey(zip: string | undefined): string {
+  return /^(\d{5})(?:[-\s]?\d{4})?$/.exec((zip ?? "").trim())?.[1] ?? comparable(zip);
 }
 
 function comparable(value: string | undefined): string {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CrmAuthError,
+  CrmHttpError,
   CrmNotFoundError,
   CrmRateLimitError,
   CrmResponseError,
@@ -17,12 +18,19 @@ function hcp(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}
   return new HousecallProClient({ apiKey: TEST_API_KEY, fetch, ...extra });
 }
 
-/** A GET /customers page in the documented shape. */
-function customers(page: number, count: number, totalPages: number | undefined, pageSize = 100, first = (page - 1) * pageSize + 1) {
+/** A GET /customers page in the documented shape; `total` sets total_pages and total_items, either may be left out. */
+function customers(
+  page: number,
+  count: number,
+  total: { pages?: number; items?: number },
+  pageSize = 100,
+  first = (page - 1) * pageSize + 1,
+) {
   return json({
     page,
     page_size: pageSize,
-    ...(totalPages === undefined ? {} : { total_pages: totalPages, total_items: totalPages * pageSize }),
+    ...(total.pages === undefined ? {} : { total_pages: total.pages }),
+    ...(total.items === undefined ? {} : { total_items: total.items }),
     customers: Array.from({ length: count }, (_, i) => hcpCustomer(first + i)),
   });
 }
@@ -39,6 +47,7 @@ function loose<T>(value: unknown): T {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("Housecall Pro testConnection", () => {
@@ -58,6 +67,7 @@ describe("Housecall Pro testConnection", () => {
   });
 
   it("waits until the RateLimit-Reset time after a 429, then retries", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
     vi.useFakeTimers();
     vi.setSystemTime(Date.parse("2026-01-01T00:00:00Z"));
     const reset = String(Date.parse("2026-01-01T00:00:04Z") / 1000);
@@ -82,7 +92,8 @@ describe("Housecall Pro testConnection", () => {
 
 describe("Housecall Pro iterateContacts", () => {
   it("pages with page/page_size, oldest first, and stops at total_pages", async () => {
-    const { fetch, calls } = mockFetch(customers(1, 2, 3, 2), customers(2, 2, 3, 2), customers(3, 1, 3, 2));
+    const total = { pages: 3, items: 5 };
+    const { fetch, calls } = mockFetch(customers(1, 2, total, 2), customers(2, 2, total, 2), customers(3, 1, total, 2));
     const { contacts, truncated } = await hcp(fetch).listContacts({ pageSize: 2 });
 
     expect(contacts.map((c) => c.externalId)).toEqual([
@@ -103,28 +114,43 @@ describe("Housecall Pro iterateContacts", () => {
   });
 
   it("asks for 100 per page by default and sends a larger pageSize as given, since no maximum is documented", async () => {
-    const first = mockFetch(customers(1, 0, 0));
+    const first = mockFetch(customers(1, 0, { pages: 0, items: 0 }));
     await hcp(first.fetch).listContacts();
     expect(first.calls[0]?.url.searchParams.get("page_size")).toBe("100");
 
-    const second = mockFetch(customers(1, 0, 0));
+    const second = mockFetch(customers(1, 0, { pages: 0, items: 0 }));
     await hcp(second.fetch).listContacts({ pageSize: 500 });
     expect(second.calls[0]?.url.searchParams.get("page_size")).toBe("500");
   });
 
   it("follows total_pages even when the server pages smaller than asked", async () => {
-    const { fetch, calls } = mockFetch(customers(1, 10, 2, 10), customers(2, 10, 2, 10));
+    const total = { pages: 2, items: 20 };
+    const { fetch, calls } = mockFetch(customers(1, 10, total, 10), customers(2, 10, total, 10));
     const { contacts } = await hcp(fetch).listContacts({ pageSize: 100 });
     expect(contacts).toHaveLength(20);
     expect(calls).toHaveLength(2);
   });
 
-  it("stops at a short page, or an empty one, when total_pages is missing", async () => {
-    const short = mockFetch(customers(1, 2, undefined, 2), customers(2, 1, undefined, 2));
+  it("keeps reading past total_pages while total_items says records remain, until an empty page", async () => {
+    // total_pages worked out from the 100 asked for, while the server sent 2 per page.
+    const total = { pages: 1, items: 5 };
+    const { fetch, calls } = mockFetch(customers(1, 2, total, 2), customers(2, 2, total, 2), customers(3, 1, total, 2));
+    const { contacts, truncated } = await hcp(fetch).listContacts();
+    expect(contacts).toHaveLength(5);
+    expect(truncated).toBe(false);
+    expect(calls).toHaveLength(3);
+
+    const shortfall = mockFetch(customers(1, 2, { items: 3 }, 2), customers(2, 0, { items: 3 }, 2));
+    expect((await hcp(shortfall.fetch).listContacts()).contacts).toHaveLength(2);
+    expect(shortfall.calls).toHaveLength(2);
+  });
+
+  it("stops at a short page, or an empty one, when both totals are missing", async () => {
+    const short = mockFetch(customers(1, 2, {}, 2), customers(2, 1, {}, 2));
     expect((await hcp(short.fetch).listContacts({ pageSize: 2 })).contacts).toHaveLength(3);
     expect(short.calls).toHaveLength(2);
 
-    const empty = mockFetch(customers(1, 2, undefined, 2), customers(2, 0, undefined, 2));
+    const empty = mockFetch(customers(1, 2, {}, 2), customers(2, 0, {}, 2));
     expect((await hcp(empty.fetch).listContacts({ pageSize: 2 })).contacts).toHaveLength(2);
     expect(empty.calls).toHaveLength(2);
   });
@@ -161,10 +187,13 @@ describe("Housecall Pro iterateContacts", () => {
       tags: "storm",
       addresses: [hcpAddress(4, { type: "billing" })],
     });
-    const { fetch } = mockFetch(
+    const { fetch, calls } = mockFetch(
       json({ page: 1, page_size: 100, total_pages: 1, total_items: 3, customers: [{ first_name: "No Id" }, companyOnly, "junk"] }),
+      json({ page: 2, page_size: 100, total_pages: 1, total_items: 3, customers: [] }),
     );
     const { contacts } = await hcp(fetch).listContacts();
+    // Only one of the three reported records was readable, so it asked once more and found nothing.
+    expect(calls).toHaveLength(2);
     expect(contacts).toEqual([
       {
         externalId: "cus_fixture00002",
@@ -177,28 +206,31 @@ describe("Housecall Pro iterateContacts", () => {
   });
 
   it("stops at maxRecords and reports whether more remain", async () => {
-    const midPage = mockFetch(customers(1, 3, 1, 3));
+    const midPage = mockFetch(customers(1, 3, { pages: 1, items: 3 }, 3));
     expect(await hcp(midPage.fetch).listContacts({ pageSize: 3, maxRecords: 2 })).toMatchObject({ truncated: true });
 
-    const endOfPage = mockFetch(customers(1, 2, 2, 2));
+    const endOfPage = mockFetch(customers(1, 2, { pages: 2, items: 4 }, 2));
     const more = await hcp(endOfPage.fetch).listContacts({ pageSize: 2, maxRecords: 2 });
     expect(more).toMatchObject({ truncated: true });
     expect(more.contacts).toHaveLength(2);
     expect(endOfPage.calls).toHaveLength(1);
 
-    const exact = mockFetch(customers(1, 2, 1, 2));
+    const exact = mockFetch(customers(1, 2, { pages: 1, items: 2 }, 2));
     expect(await hcp(exact.fetch).listContacts({ pageSize: 2, maxRecords: 2 })).toMatchObject({ truncated: false });
   });
 
-  it("drops a record repeated on a later page", async () => {
-    const { fetch } = mockFetch(customers(1, 2, 2, 2), customers(2, 2, 2, 2, 2));
+  it("drops a record repeated on a later page, then looks for the one it displaced", async () => {
+    const total = { pages: 2, items: 4 };
+    const { fetch, calls } = mockFetch(customers(1, 2, total, 2), customers(2, 2, total, 2, 2), customers(3, 1, total, 2, 4));
     const { contacts } = await hcp(fetch).listContacts({ pageSize: 2 });
-    expect(contacts.map((c) => c.externalId)).toEqual(["cus_fixture00001", "cus_fixture00002", "cus_fixture00003"]);
+    expect(contacts.map((c) => c.externalId)).toEqual(["cus_fixture00001", "cus_fixture00002", "cus_fixture00003", "cus_fixture00004"]);
+    expect(calls).toHaveLength(3);
   });
 
   it("throws instead of looping when a page holds only records already read", async () => {
-    const { fetch, calls } = mockFetch(customers(1, 2, 5, 2), customers(2, 2, 5, 2, 1));
-    await expect(hcp(fetch).listContacts({ pageSize: 2 })).rejects.toThrow(/page 2 held only records already read/);
+    const total = { pages: 5, items: 10 };
+    const { fetch, calls } = mockFetch(customers(1, 2, total, 2), customers(2, 2, total, 2, 1));
+    await expect(hcp(fetch).listContacts({ pageSize: 2 })).rejects.toThrow(/page 2 held no new records with an id/);
     expect(calls).toHaveLength(2);
   });
 
@@ -227,7 +259,6 @@ describe("Housecall Pro createContact", () => {
       tags: ["storm", " ", "canvassing"],
       sourceName: "Door Knock",
       description: "Met at the door.",
-      assignedRepName: "Ignored Name",
       skipAutomation: false,
     });
 
@@ -261,9 +292,10 @@ describe("Housecall Pro createContact", () => {
     [{ firstName: "Pat", statusName: "Lead" }, /statusName is supported only by the JobNimbus adapter/],
     [{ firstName: "Pat", skipAutomation: true }, /skipAutomation is supported only by the JobNimbus adapter/],
     [{ firstName: "Pat", skipNotification: true }, /skipNotification is supported only by the JobNimbus adapter/],
-    [{ firstName: "Pat", assignedRepExternalId: "pro_1" }, /customers have no assigned employee; pass it to createJob/],
+    [{ firstName: "Pat", assignedRepExternalId: "pro_1" }, /customers have no assigned employee; pass the employee ID to createJob/],
     [{ firstName: "Pat", tags: "storm" }, /tags must be an array of strings/],
     [{ firstName: "Pat", address: { zip: 0 } }, /address\.zip must be a string/],
+    [{ firstName: "Pat", assignedRepName: "Jordan Avery" }, /assignedRepName: Housecall Pro customers have no assigned employee/],
     [{ firstName: "Pat", assignedRepName: 5 }, /assignedRepName must be a string/],
     [null, /payload is required/],
   ])("rejects %o before any request", async (payload, message) => {
@@ -288,6 +320,7 @@ describe("Housecall Pro createJob", () => {
     const result = await hcp(fetch).createJob({
       primaryContactExternalId: "cus_fixture00001",
       assignedRepExternalId: "pro_fixture1",
+      assignedRepName: "Jordan Avery", // stored nowhere, but harmless next to the ID
       tags: ["storm"],
       sourceName: "Door Knock",
       description: "Inspect the north slope.",
@@ -321,13 +354,102 @@ describe("Housecall Pro createJob", () => {
     expect(calls[1]?.body).toEqual({ customer_id: "cus_fixture00001", address_id: "adr_fixture00001" });
   });
 
-  it("matches on the first street line alone too", async () => {
+  it("matches a street without a unit to the customer's one address there that has a unit", async () => {
     const { fetch, calls } = mockFetch(addresses([hcpAddress(3, { street_line_2: "Rear" })]), json(job, 201));
-    await hcp(fetch).createJob({
-      primaryContactExternalId: "cus_fixture00001",
-      address: { street: "3 Fixture Row", city: "Testville", state: "ZZ", zip: "00000", country: "US" },
-    });
+    await hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: "3 Fixture Row", zip: "00000" } });
     expect(calls[1]?.body).toMatchObject({ address_id: "adr_fixture00003" });
+  });
+
+  it("refuses to guess between units at the same street, and writes nothing", async () => {
+    const existing = [hcpAddress(3, { street_line_2: "Unit A" }), hcpAddress(4, { street: "3 Fixture Row", street_line_2: "Unit B" })];
+    const { fetch, calls } = mockFetch(addresses(existing));
+    const error = await hcp(fetch)
+      .createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: "3 Fixture Row", zip: "00000" } })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CrmValidationError);
+    expect((error as Error).message).toMatch(/has 2 units at that street address; put the unit in address\.street/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("prefers an address without a unit when the street has no unit", async () => {
+    const existing = [hcpAddress(3, { street_line_2: "Unit A" }), hcpAddress(4, { street: "3 Fixture Row" })];
+    const { fetch, calls } = mockFetch(addresses(existing), json(job, 201));
+    await hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: "3 Fixture Row", zip: "00000" } });
+    expect(calls[1]?.body).toMatchObject({ address_id: "adr_fixture00004" });
+  });
+
+  it("compares US zips on five digits, so ZIP+4 matches a stored five-digit zip", async () => {
+    const { fetch, calls } = mockFetch(addresses([hcpAddress(1)]), json(job, 201));
+    await hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: "1 Fixture Row", zip: "00000-1234" } });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.body).toMatchObject({ address_id: "adr_fixture00001" });
+  });
+
+  it("needs only street and zip to use an address the customer already has", async () => {
+    const { fetch, calls } = mockFetch(addresses([hcpAddress(1, { country: null })]), json(job, 201));
+    await hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: "1 Fixture Row", zip: "00000" } });
+    expect(calls[1]?.body).toMatchObject({ address_id: "adr_fixture00001" });
+  });
+
+  it("names the parts it still needs to add an address, after reading, and writes nothing", async () => {
+    const { fetch, calls } = mockFetch(addresses([hcpAddress(1)]));
+    const error = await hcp(fetch)
+      .createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: "9 Fixture Row", state: "ZZ", zip: "00000" } })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CrmValidationError);
+    expect((error as Error).message).toMatch(/adding one also needs address\.city, address\.country \(Housecall Pro requires street, city, state, zip and country\)/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("treats an empty address object as no address", async () => {
+    const { fetch, calls } = mockFetch(addresses([hcpAddress(1)]), json(job, 201));
+    await hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: " " } });
+    expect(calls[1]?.body).toMatchObject({ address_id: "adr_fixture00001" });
+  });
+
+  it("stops reading addresses at the first exact match", async () => {
+    const { fetch, calls } = mockFetch(addresses([hcpAddress(1)], 1, 3), json(job, 201));
+    await hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001", address: { street: "1 Fixture Row", zip: "00000" } });
+    expect(calls.map((c) => `${c.method} ${c.url.pathname}`)).toEqual(["GET /customers/cus_fixture00001/addresses", "POST /jobs"]);
+  });
+
+  it("stops reading addresses once a second one shows there is no single address to use", async () => {
+    const { fetch, calls } = mockFetch(addresses([hcpAddress(1), hcpAddress(2)], 1, 3));
+    await expect(hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001" })).rejects.toThrow(/has more than one address/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("leaves an added address in place when POST /jobs fails, and reuses it on the retry", async () => {
+    const address = { street: "7 Fixture Row", city: "Testville", state: "ZZ", zip: "00000", country: "US" };
+    const { fetch, calls } = mockFetch(
+      addresses([]),
+      json(hcpAddress(7)),
+      text("Unprocessable", 422),
+      addresses([hcpAddress(7)]),
+      json(job, 201),
+    );
+    const client = hcp(fetch);
+    await expect(client.createJob({ primaryContactExternalId: "cus_fixture00001", address })).rejects.toBeInstanceOf(CrmHttpError);
+    await expect(client.createJob({ primaryContactExternalId: "cus_fixture00001", address })).resolves.toEqual({ externalId: "job_new" });
+    expect(calls.map((c) => `${c.method} ${c.url.pathname}`)).toEqual([
+      "GET /customers/cus_fixture00001/addresses",
+      "POST /customers/cus_fixture00001/addresses",
+      "POST /jobs",
+      "GET /customers/cus_fixture00001/addresses",
+      "POST /jobs",
+    ]);
+  });
+
+  it("stops between requests when the caller aborts, and creates no job", async () => {
+    const controller = new AbortController();
+    const { fetch, calls } = mockFetch(() => {
+      controller.abort(new Error("user cancelled"));
+      return addresses([hcpAddress(1)]);
+    });
+    await expect(hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001" }, { signal: controller.signal })).rejects.toThrow(
+      "user cancelled",
+    );
+    expect(calls).toHaveLength(1);
   });
 
   it("adds the address to the customer when none matches, then uses it", async () => {
@@ -362,7 +484,7 @@ describe("Housecall Pro createJob", () => {
 
   it.each([
     [[], /customer cus_fixture00001 has no address; pass address to add one/],
-    [[hcpAddress(1), hcpAddress(2)], /customer cus_fixture00001 has 2 addresses; pass address to choose one/],
+    [[hcpAddress(1), hcpAddress(2)], /customer cus_fixture00001 has more than one address; pass address to choose one/],
   ])("creates nothing when the customer's address is ambiguous (%#)", async (list, message) => {
     const { fetch, calls } = mockFetch(addresses(list));
     const error = await hcp(fetch).createJob({ primaryContactExternalId: "cus_fixture00001" }).catch((e: unknown) => e);
@@ -375,8 +497,9 @@ describe("Housecall Pro createJob", () => {
     [{}, /primaryContactExternalId is required/],
     [{ primaryContactExternalId: "cus_1", name: "Roof" }, /jobs have no name; put the text in description/],
     [{ primaryContactExternalId: "cus_1", recordTypeName: "Job" }, /recordTypeName is supported only by the JobNimbus adapter/],
-    [{ primaryContactExternalId: "cus_1", address: { street: "1 Fixture Row", zip: "00000" } }, /address\.city is required: Housecall Pro needs street, city, state, zip and country/],
-    [{ primaryContactExternalId: "cus_1", address: { street: "1 Fixture Row", city: "Testville", state: "ZZ", zip: "00000" } }, /address\.country is required/],
+    [{ primaryContactExternalId: "cus_1", address: { city: "Testville", zip: "00000" } }, /address\.street is required: createJob finds the customer's address by street and zip/],
+    [{ primaryContactExternalId: "cus_1", address: { street: "1 Fixture Row" } }, /address\.zip is required/],
+    [{ primaryContactExternalId: "cus_1", assignedRepName: "Jordan Avery" }, /assignedRepName needs assignedRepExternalId/],
     [{ primaryContactExternalId: "cus_1", assignedRepExternalId: 7 }, /assignedRepExternalId must be a string/],
     [undefined, /payload is required/],
   ])("rejects %o before any request", async (payload, message) => {
