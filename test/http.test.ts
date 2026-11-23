@@ -1,6 +1,6 @@
 import { inspect } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpClient, parseRetryAfter } from "../src/http.js";
+import { HttpClient, parseRateLimitReset, parseRetryAfter } from "../src/http.js";
 import {
   CrmAuthError,
   CrmHttpError,
@@ -11,6 +11,7 @@ import {
   CrmTimeoutError,
   CrmValidationError,
   AccuLynxClient,
+  HousecallProClient,
   JobNimbusClient,
   RequestLimiter,
 } from "../src/index.js";
@@ -283,6 +284,7 @@ describe("the API key stays private", () => {
     const clients = [
       new JobNimbusClient({ apiKey: MARKER, fetch }),
       new AccuLynxClient({ apiKey: MARKER, fetch }),
+      new HousecallProClient({ apiKey: MARKER, fetch }),
       new HttpClient("jobnimbus", DEFAULTS, { apiKey: MARKER, fetch }),
     ];
     for (const crm of clients) {
@@ -439,6 +441,113 @@ describe("timeouts and cancellation", () => {
   it("builds replies lazily when asked", async () => {
     const { fetch } = mockFetch(jsonLater(() => ({ at: "request time" })));
     await expect(client(fetch).request("/x")).resolves.toEqual({ at: "request time" });
+  });
+});
+
+describe("RateLimit-Reset, for providers that document it", () => {
+  const HCP_DEFAULTS = { ...DEFAULTS, authScheme: "Token" as const, rateLimitReset: true };
+  const now = Date.parse("2026-01-01T00:00:00Z");
+  const epoch = (secondsFromNow: number) => String(now / 1000 + secondsFromNow);
+
+  function hcpHttp(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) {
+    return new HttpClient("housecallpro", HCP_DEFAULTS, { apiKey: TEST_API_KEY, fetch, ...extra });
+  }
+
+  it("sends the key with the provider's scheme", async () => {
+    const { fetch, calls } = mockFetch(json({}));
+    await hcpHttp(fetch).request("/things");
+    expect(calls[0]?.headers.authorization).toBe(`Token ${TEST_API_KEY}`);
+  });
+
+  it("prefers RateLimit-Reset over Retry-After", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch, calls } = mockFetch(text("", 429, { "ratelimit-reset": epoch(5), "retry-after": "1" }), json({ ok: true }));
+    const pending = hcpHttp(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("backs off instead of retrying at once when the reset time has already passed", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch, calls } = mockFetch(text("", 429, { "ratelimit-reset": epoch(-30) }), json({ ok: true }));
+    const pending = hcpHttp(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("falls back to Retry-After when RateLimit-Reset is missing or unreadable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch, calls } = mockFetch(text("", 429, { "ratelimit-reset": "soon", "retry-after": "2" }), json({ ok: true }));
+    const pending = hcpHttp(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("is ignored for providers that do not document it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch, calls } = mockFetch(text("", 429, { "ratelimit-reset": epoch(30) }), json({ ok: true }));
+    const pending = client(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(1_000); // the 1 s fallback backoff, not 30 s
+    await expect(pending).resolves.toEqual({ ok: true });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("reports the reset as retryAfterMs when it is longer than maxRetryDelayMs", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch, calls } = mockFetch(text("", 429, { "ratelimit-reset": epoch(120) }));
+    const error = await hcpHttp(fetch, { maxRetryDelayMs: 60_000 }).request("/things").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CrmRateLimitError);
+    expect((error as CrmRateLimitError).retryAfterMs).toBe(120_000);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("treats a 503 with RateLimit-Reset as a rate limit", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { fetch } = mockFetch(text("", 503, { "ratelimit-reset": epoch(3) }), json({ ok: true }));
+    const pending = hcpHttp(fetch).request("/things");
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("parseRateLimitReset", () => {
+  const now = Date.parse("2026-01-01T00:00:00Z");
+
+  it("reads Unix seconds and Unix milliseconds as the reset moment", () => {
+    expect(parseRateLimitReset(String(now / 1000 + 7), now)).toBe(7_000);
+    expect(parseRateLimitReset(String(now + 1_500), now)).toBe(1_500);
+    expect(parseRateLimitReset(` ${now / 1000 + 2.5} `, now)).toBe(2_500);
+  });
+
+  it("never returns a negative wait for a moment already passed", () => {
+    expect(parseRateLimitReset(String(now / 1000 - 60), now)).toBe(0);
+    expect(parseRateLimitReset(String(now - 60_000), now)).toBe(0);
+  });
+
+  it("reads a small number as seconds from now", () => {
+    expect(parseRateLimitReset("30", now)).toBe(30_000);
+    expect(parseRateLimitReset("0", now)).toBe(0);
+  });
+
+  it("ignores missing, unreadable or out-of-range values", () => {
+    expect(parseRateLimitReset(null, now)).toBeUndefined();
+    expect(parseRateLimitReset("", now)).toBeUndefined();
+    expect(parseRateLimitReset("-5", now)).toBeUndefined();
+    expect(parseRateLimitReset("Thu, 01 Jan 2026 00:00:10 GMT", now)).toBeUndefined();
+    expect(parseRateLimitReset("50000000000", now)).toBeUndefined();
+    expect(parseRateLimitReset("99999999999999", now)).toBeUndefined();
   });
 });
 

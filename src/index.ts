@@ -2,9 +2,10 @@ export { createCrmClient, isCrmProviderName, CRM_PROVIDERS } from "./registry.js
 export type { CrmProviderInfo } from "./registry.js";
 export { JobNimbusClient } from "./providers/jobnimbus.js";
 export { AccuLynxClient } from "./providers/acculynx.js";
+export { HousecallProClient } from "./providers/housecallpro.js";
 export { createRepMatcher, collectAssignedReps } from "./match.js";
 export type { RepCandidate } from "./match.js";
-export { parseRetryAfter } from "./http.js";
+export { parseRateLimitReset, parseRetryAfter } from "./http.js";
 export { RequestLimiter } from "./limiter.js";
 export type { FetchLike, FetchInit, FetchResponse } from "./fetch.js";
 export type { ClientOptions, CallOptions } from "./http.js";
@@ -33,6 +34,9 @@ export type {
   CrmNote,
   CrmContactPayload,
   CrmJobPayload,
+  JobNimbusContactPayload,
+  JobNimbusJobPayload,
+  HousecallProJobPayload,
   CrmCapabilities,
   CrmClient,
   ListContactsOptions,

@@ -1,7 +1,7 @@
 import type { CallOptions } from "./http.js";
 
 /** Providers this package ships an adapter for. */
-export type CrmProviderName = "jobnimbus" | "acculynx";
+export type CrmProviderName = "jobnimbus" | "acculynx" | "housecallpro";
 
 /** A postal address as the CRMs store it. Every part is optional. */
 export interface CrmAddress {
@@ -28,14 +28,15 @@ export interface CrmAssignedRep {
 /**
  * One customer record, normalized across providers.
  *
- * JobNimbus returns contacts. AccuLynx is job-centric, so its adapter returns
- * one `CrmContact` per job, with the job ID as `externalId`.
+ * JobNimbus returns contacts and Housecall Pro returns customers. AccuLynx is
+ * job-centric, so its adapter returns one `CrmContact` per job, with the job
+ * ID as `externalId`.
  *
  * Email and phone are returned as the CRM stores them (trimmed only). Phone
  * formats vary by account and country, so normalizing them is left to you.
  */
 export interface CrmContact {
-  /** The provider's record ID (JobNimbus `jnid`, AccuLynx job `id`). */
+  /** The provider's record ID (JobNimbus `jnid`, AccuLynx job `id`, Housecall Pro customer `id`). */
   externalId: string;
   /** Display name: the CRM's display name, else first and last name, else company name. */
   name?: string;
@@ -43,17 +44,17 @@ export interface CrmContact {
   firstName?: string;
   /** Family name of the person. */
   lastName?: string;
-  /** Email address, as stored (JobNimbus only; AccuLynx returns emails as links). */
+  /** Email address, as stored (JobNimbus and Housecall Pro; AccuLynx returns emails as links). */
   email?: string;
-  /** Phone number, as stored: mobile first, then home, then work (JobNimbus only). */
+  /** Phone number, as stored: mobile first, then home, then work (JobNimbus and Housecall Pro). */
   phone?: string;
-  /** Property or job address. */
+  /** Property or job address (Housecall Pro: the customer's first service address, else its first address). */
   address?: CrmAddress;
   /** Sales reps on the record, primary first. Empty when the CRM names none. */
   assignedReps: CrmAssignedRep[];
   /** Tag names. */
   tags?: string[];
-  /** Workflow status (JobNimbus) or current milestone (AccuLynx). */
+  /** Workflow status (JobNimbus) or current milestone (AccuLynx). Housecall Pro customers have none. */
   status?: string;
   /** `true` when the CRM marks the record archived (JobNimbus `is_archived`). */
   archived?: boolean;
@@ -89,7 +90,7 @@ export interface CrmJobContext {
   propertyDetails?: string;
   /** Insurance carrier or claim context (from a custom field mapping). */
   insuranceContext?: string;
-  /** The record's description text. */
+  /** The record's description text (Housecall Pro: the customer's notes). */
   rawSummary?: string;
 }
 
@@ -119,27 +120,34 @@ export interface CrmNote {
 
 /** Fields shared by contact and job creation. */
 interface CrmRecordPayloadBase {
-  /** Property address. */
+  /**
+   * Property address. Housecall Pro `createJob`: the job's address, found among
+   * the customer's addresses or added to them; see {@link HousecallProClient.createJob}.
+   */
   address?: CrmAddress | undefined;
-  /** Tag names. JobNimbus stores them as one comma-separated string, so a tag may not contain a comma. */
+  /** Tag names. JobNimbus stores them as one comma-separated string, so a tag may not contain a comma there. */
   tags?: string[] | undefined;
-  /** Saved as the record's description. */
+  /** Saved as the record's description (Housecall Pro: its notes). */
   description?: string | undefined;
-  /** Provider user ID of the sales rep to assign. */
+  /** Provider user ID of the sales rep to assign (Housecall Pro: an employee ID, on jobs only). */
   assignedRepExternalId?: string | undefined;
-  /** Sales rep display name, for providers that store it alongside the ID. */
+  /** Sales rep display name, for providers that store it alongside the ID (JobNimbus). Others ignore it. */
   assignedRepName?: string | undefined;
-  /** Lead source name. Must match one defined in the account. */
+  /** Lead source name. JobNimbus requires one defined in the account. */
   sourceName?: string | undefined;
-  /** JobNimbus `?skip=automation`: do not fire the account's automation rules for this write. */
+  /** JobNimbus `?skip=automation`: do not fire the account's automation rules for this write. Other adapters reject `true`. */
   skipAutomation?: boolean | undefined;
-  /** JobNimbus `?skip=notification`: do not send email or push notifications for this write. */
+  /** JobNimbus `?skip=notification`: do not send email or push notifications for this write. Other adapters reject `true`. */
   skipNotification?: boolean | undefined;
 }
 
-/** Input for {@link CrmClient.createContact}. */
+/**
+ * Input for {@link CrmClient.createContact}. JobNimbus needs `firstName`,
+ * `lastName` or `companyName`; Housecall Pro needs `firstName`, `lastName`,
+ * `email` or `phone`.
+ */
 export interface CrmContactPayload extends CrmRecordPayloadBase {
-  /** At least one of `firstName`, `lastName` or `companyName` is required. */
+  /** Given name. */
   firstName?: string | undefined;
   /** Family name. */
   lastName?: string | undefined;
@@ -149,22 +157,46 @@ export interface CrmContactPayload extends CrmRecordPayloadBase {
   email?: string | undefined;
   /** Saved as the mobile phone. */
   phone?: string | undefined;
+  /** JobNimbus contact workflow (record type) name, e.g. "Customer". Must exist in the account. Required by JobNimbus; other adapters reject it. */
+  recordTypeName?: string | undefined;
+  /** JobNimbus status within that workflow, e.g. "Lead". Must exist in the account. Required by JobNimbus; other adapters reject it. */
+  statusName?: string | undefined;
+}
+
+/** Input for {@link CrmClient.createJob}. */
+export interface CrmJobPayload extends CrmRecordPayloadBase {
+  /** Job name, e.g. "Example roof replacement". Required by JobNimbus; Housecall Pro jobs have no name, so it rejects it. */
+  name?: string | undefined;
+  /** JobNimbus job workflow (record type) name. Must exist in the account. Required by JobNimbus; other adapters reject it. */
+  recordTypeName?: string | undefined;
+  /** JobNimbus status within that workflow. Must exist in the account. Required by JobNimbus; other adapters reject it. */
+  statusName?: string | undefined;
+  /** Link the job to an existing contact by its `externalId`. Required by Housecall Pro, where every job belongs to a customer. */
+  primaryContactExternalId?: string | undefined;
+}
+
+/** A {@link CrmContactPayload} with the fields JobNimbus requires. What {@link JobNimbusClient.createContact} accepts. */
+export interface JobNimbusContactPayload extends CrmContactPayload {
   /** Contact workflow (record type) name, e.g. "Customer". Must exist in the account. */
   recordTypeName: string;
   /** Status within that workflow, e.g. "Lead". Must exist in the account. */
   statusName: string;
 }
 
-/** Input for {@link CrmClient.createJob}. */
-export interface CrmJobPayload extends CrmRecordPayloadBase {
+/** A {@link CrmJobPayload} with the fields JobNimbus requires. What {@link JobNimbusClient.createJob} accepts. */
+export interface JobNimbusJobPayload extends CrmJobPayload {
   /** Job name, e.g. "Example roof replacement". */
   name: string;
   /** Job workflow (record type) name. Must exist in the account. */
   recordTypeName: string;
   /** Status within that workflow. Must exist in the account. */
   statusName: string;
-  /** Link the job to an existing contact by its `externalId`. */
-  primaryContactExternalId?: string | undefined;
+}
+
+/** A {@link CrmJobPayload} with the field Housecall Pro requires. What {@link HousecallProClient.createJob} accepts. */
+export interface HousecallProJobPayload extends CrmJobPayload {
+  /** The customer the job is for: a Housecall Pro customer `id`, as `createContact` or `listContacts` return it. */
+  primaryContactExternalId: string;
 }
 
 /** What an adapter can do. Calling an unsupported method rejects with `CrmUnsupportedError`. */
@@ -183,13 +215,17 @@ export interface CrmCapabilities {
 
 /** Options for {@link CrmClient.iterateContacts} and {@link CrmClient.listContacts}. */
 export interface ListContactsOptions extends CallOptions {
-  /** Records per request: a whole number of at least 1, clamped to the provider's documented maximum (JobNimbus 1000, AccuLynx 25). */
+  /**
+   * Records per request: a whole number of at least 1, clamped to the
+   * provider's documented maximum (JobNimbus 1000, AccuLynx 25). Housecall Pro
+   * documents none, so it is sent as given (default 100).
+   */
   pageSize?: number | undefined;
   /** Stop after this many records: a whole number of at least 1. Default 50,000. Check `truncated` on the result. */
   maxRecords?: number | undefined;
-  /** Fill {@link CrmJobContext} from custom fields. JobNimbus only; AccuLynx rejects it. */
+  /** Fill {@link CrmJobContext} from custom fields. JobNimbus only; the other adapters reject it. */
   customFieldMappings?: CustomFieldMappings | undefined;
-  /** Also return records the CRM marks deleted (JobNimbus `is_active: false`). Default `false`. JobNimbus only; AccuLynx rejects it. */
+  /** Also return records the CRM marks deleted (JobNimbus `is_active: false`). Default `false`. JobNimbus only; the other adapters reject it. */
   includeDeleted?: boolean | undefined;
 }
 
@@ -215,7 +251,7 @@ export interface ListNotesOptions extends CallOptions {
 
 /** Options for {@link CrmClient.createNote}. */
 export interface CreateNoteOptions extends CallOptions {
-  /** Shown as the activity's source in the CRM, e.g. your app's name. */
+  /** Shown as the activity's source in the CRM, e.g. your app's name. JobNimbus only; Housecall Pro rejects it. */
   source?: string | undefined;
 }
 
@@ -243,7 +279,7 @@ export interface CrmClient {
   createContact(payload: CrmContactPayload, options?: CallOptions): Promise<{ externalId: string }>;
   /** Create a job. Resolves with the new record's ID. */
   createJob(payload: CrmJobPayload, options?: CallOptions): Promise<{ externalId: string }>;
-  /** Add a note to a contact or job. Resolves with the new note's ID. */
+  /** Add a note to a contact or job (Housecall Pro: jobs only). Resolves with the new note's ID. */
   createNote(recordExternalId: string, note: string, options?: CreateNoteOptions): Promise<{ externalId: string }>;
   /** Read the most recent notes on a contact or job, newest first. */
   listNotes(recordExternalId: string, options?: ListNotesOptions): Promise<CrmNote[]>;

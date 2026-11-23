@@ -1,10 +1,12 @@
 {
   "name": "contractor-crm-adapters",
-  "version": "0.1.0",
-  "description": "Typed TypeScript clients for the roofing and home-improvement CRMs JobNimbus and AccuLynx: one normalized contact shape, injectable fetch, timeouts, pagination and Retry-After handling.",
+  "version": "0.2.0",
+  "description": "Typed TypeScript clients for the JobNimbus, AccuLynx and Housecall Pro APIs used by roofing and home-service contractors: one normalized contact shape, injectable fetch, timeouts, pagination and rate-limit handling.",
   "keywords": [
     "jobnimbus",
     "acculynx",
+    "housecall-pro",
+    "housecallpro",
     "crm",
     "roofing",
     "contractor",

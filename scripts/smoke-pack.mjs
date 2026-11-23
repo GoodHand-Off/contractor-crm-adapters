@@ -1,5 +1,6 @@
 // Packs the library, installs the tarball into a throwaway project, and checks
-// that it works the way a user would consume it: plain-JavaScript ESM import,
+// that it works the way a user would consume it: plain-JavaScript ESM import
+// (JobNimbus and Housecall Pro),
 // require() where the running Node supports require(esm), and TypeScript
 // typechecking with skipLibCheck off: lib ES2022 only (no DOM, no @types/node),
 // NodeNext and Bundler with DOM, and NodeNext with @types/node.
@@ -35,7 +36,13 @@ try {
 
   write("esm.mjs", `import { createCrmClient } from "contractor-crm-adapters";${stub}
 const { contacts } = await createCrmClient("jobnimbus", { apiKey: "test-key", fetch }).listContacts();${check}
-console.log("  esm import: ok");`);
+const hcpFetch = async (url, init) => {
+  if (init.headers.Authorization !== "Token test-key") throw new Error("Housecall Pro needs a Token header");
+  return new Response(JSON.stringify({ page: 1, total_pages: 1, customers: [{ id: "cus_1", first_name: "Pat", last_name: "Example" }] }));
+};
+const hcp = await createCrmClient("housecallpro", { apiKey: "test-key", fetch: hcpFetch }).listContacts();
+if (hcp.contacts.length !== 1 || hcp.contacts[0].name !== "Pat Example") throw new Error("unexpected Housecall Pro result");
+console.log("  esm import: ok (JobNimbus and Housecall Pro)");`);
   process.stdout.write(run(process.execPath, ["esm.mjs"]));
 
   if (process.features.require_module) {
@@ -50,7 +57,7 @@ new JobNimbusClient({ apiKey: "test-key", fetch }).listContacts().then(({ contac
 
   // A consumer that names no DOM or Node types: it must compile with lib ES2022 alone.
   write("consumer.ts", `import {
-  createCrmClient, JobNimbusClient, CrmRateLimitError, CRM_PROVIDERS, RequestLimiter,
+  createCrmClient, JobNimbusClient, HousecallProClient, CrmRateLimitError, CRM_PROVIDERS, RequestLimiter,
   type CrmClient, type CrmContact, type ContactList,
 } from "contractor-crm-adapters";
 const limiter = new RequestLimiter({ minIntervalMs: 40 });
@@ -72,7 +79,18 @@ const contact: CrmContact = { externalId: "x", assignedReps: [{ externalId: "u1"
 const help: string = CRM_PROVIDERS.jobnimbus.keyHelp;
 // @ts-expect-error an unknown provider is a type error
 createCrmClient("other", { apiKey: "k" });
-export { client, jn, names, truncated, retryIn, contact, help };
+async function newJob(hcp: HousecallProClient): Promise<string> {
+  const { externalId } = await hcp.createContact({ phone: "555-555-0102" });
+  return (await hcp.createJob({ primaryContactExternalId: externalId })).externalId;
+}
+async function generic(crm: CrmClient): Promise<string> {
+  return (await crm.createContact({ firstName: "Pat" })).externalId;
+}
+async function jobNimbusNeedsWorkflow(): Promise<void> {
+  // @ts-expect-error JobNimbusClient.createContact requires recordTypeName and statusName
+  await jn.createContact({ firstName: "Pat" });
+}
+export { client, jn, names, truncated, retryIn, contact, help, newJob, generic, jobNimbusNeedsWorkflow };
 `);
   // A consumer that passes the platform fetch: needs DOM or Node types.
   write("consumer-fetch.ts", `import { JobNimbusClient, type FetchLike } from "contractor-crm-adapters";

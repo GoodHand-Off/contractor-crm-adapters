@@ -1,10 +1,11 @@
-# contractor-crm-adapters: JobNimbus API and AccuLynx API clients
+# contractor-crm-adapters: JobNimbus, AccuLynx and Housecall Pro API clients
 
-Typed Node.js and TypeScript clients for the **JobNimbus API** and the
-**AccuLynx API**, two CRMs used by roofing and home-improvement contractors.
-One normalized contact shape, an injectable `fetch`, timeouts, paging within
-each vendor's documented limits, and typed errors. For developers and agencies
-who build integrations for contractors.
+Typed Node.js and TypeScript clients for the **JobNimbus API**, the
+**AccuLynx API** and the **Housecall Pro API**, systems that roofing,
+home-improvement and home-service contractors run their jobs in. One
+normalized contact shape, an injectable `fetch`, timeouts, paging within each
+vendor's documented limits, and typed errors. For developers and agencies who
+build integrations for contractors.
 
 There is no hosted demo; this is a library. Every test runs against a mocked
 `fetch`, so `test/` shows exactly what goes over the wire.
@@ -63,14 +64,14 @@ logging or serializing a client never shows it.
 
 ## What you can do with each API
 
-| | JobNimbus | AccuLynx |
-| --- | --- | --- |
-| `testConnection()` | `GET /contacts?size=1` | `GET /company-settings` |
-| `iterateContacts()` / `listContacts()` | `GET /contacts`, all pages, deleted records skipped | `GET /jobs?includes=contact`, all pages, one record per job |
-| `createContact()` | `POST /contacts` | not supported (read-only) |
-| `createJob()` | `POST /jobs`, linked to a contact | not supported (read-only) |
-| `createNote()` | `POST /activities` as a "Note" | not supported (read-only) |
-| `listNotes()` | `GET /activities` filtered on `related.id` | not supported (no documented read endpoint) |
+| | JobNimbus | AccuLynx | Housecall Pro |
+| --- | --- | --- | --- |
+| `testConnection()` | `GET /contacts?size=1` | `GET /company-settings` | `GET /company` |
+| `iterateContacts()` / `listContacts()` | `GET /contacts`, all pages, deleted records skipped | `GET /jobs?includes=contact`, all pages, one record per job | `GET /customers`, all pages |
+| `createContact()` | `POST /contacts` | not supported (read-only) | `POST /customers` |
+| `createJob()` | `POST /jobs`, linked to a contact | not supported (read-only) | `POST /jobs` for a customer, at one of its addresses |
+| `createNote()` | `POST /activities` as a "Note" | not supported (read-only) | `POST /jobs/{job_id}/notes`, jobs only |
+| `listNotes()` | `GET /activities` filtered on `related.id` | not supported (no documented read endpoint) | not supported (no documented read endpoint) |
 
 `client.capabilities` tells you which methods a client supports. Calling an
 unsupported method rejects with `CrmUnsupportedError` and sends nothing.
@@ -102,6 +103,58 @@ await jn.createNote(externalId, "Homeowner asked for a Saturday inspection.", { 
 Inputs are checked before anything is sent. A missing `statusName`, a tag with
 a comma, or a number where a string belongs throws `CrmValidationError` naming
 the field.
+
+### Housecall Pro: what you can do
+
+The `HousecallProClient` works with the Housecall Pro API through a company API
+key, which Housecall Pro offers to accounts on its MAX plan. With it you can:
+
+- check that a key works (`testConnection`);
+- read every customer, oldest first, as `CrmContact` (`listContacts`, `iterateContacts`);
+- create a customer with name, company, email, phone, address, tags, lead
+  source and notes (`createContact`);
+- create a job for a customer, at one of the customer's addresses, with an
+  assigned employee, tags, lead source and notes (`createJob`);
+- add a note to a job (`createNote`).
+
+```ts
+import { HousecallProClient } from "contractor-crm-adapters";
+
+const hcp = new HousecallProClient({ apiKey }); // sent as "Authorization: Token <key>"
+
+const customer = await hcp.createContact({
+  firstName: "Pat",
+  lastName: "Example",
+  phone: "555-555-0102",
+  sourceName: "Website",
+  address: { street: "1 Fixture Row", city: "Testville", state: "ZZ", zip: "00000", country: "US" },
+});
+
+// The new customer has one address, so the job goes there.
+const job = await hcp.createJob({
+  primaryContactExternalId: customer.externalId,
+  assignedRepExternalId: employeeId,                     // a Housecall Pro employee ID
+  description: "Roof inspection requested on the website.", // saved as the job's notes
+});
+
+await hcp.createNote(job.externalId, "Homeowner asked for a Saturday inspection.");
+```
+
+Housecall Pro puts every job at one of the customer's addresses. Without
+`address`, `createJob` uses the customer's only address, and creates nothing if
+the customer has none or several. With `address`, it uses the customer's
+address with the same street and zip (ignoring case and punctuation), or adds
+it to the customer first; adding one takes street, city, state, zip and
+country. Fields Housecall Pro has no place for, such as a job `name` or
+JobNimbus's `recordTypeName`, are rejected with `CrmValidationError` rather
+than dropped. The one exception is `assignedRepName`, which every adapter
+ignores where the CRM stores no rep name.
+
+**Limits:** it cannot read notes back (Housecall Pro documents no endpoint for
+that), reads customers but not jobs, estimates or leads, sends no
+`X-Company-Id` header for multi-location accounts, and has not been run
+against a live Housecall Pro account. It follows Housecall Pro's public API
+documentation as read on 2026-11-23.
 
 ### Read a whole account
 
@@ -173,7 +226,8 @@ console.log(CRM_PROVIDERS[saved.provider].keyHelp); // where the user creates a 
 address, `assignedReps` (`{ externalId, name? }`, primary first), tags, status,
 and a `jobContext` with project type, milestone, lead source, dates (Unix ms)
 and values. AccuLynx is job-centric, so its adapter returns one `CrmContact` per
-job, keyed by job ID, with the job's primary contact as the person. Email and
+job, keyed by job ID, with the job's primary contact as the person. Housecall
+Pro returns one per customer. Email and
 phone come back as the CRM stores them, trimmed only. Phone formats vary by
 account and country, so normalizing them is left to you.
 
@@ -221,7 +275,10 @@ reading as "no records".
 - On HTTP 429 (or 503 with `Retry-After`) the client pauses every request it
   is making, including ones already queued, for as long as the server asks.
   It then retries the rejected request, at most twice by default (`maxRetries`,
-  0 to 10).
+  0 to 10). Housecall Pro says when to come back in a `RateLimit-Reset`
+  header (the reset time, as an epoch timestamp), so its client waits for
+  that. A reset time already passed, as a clock running ahead would make it,
+  gets the 1 s, 2 s backoff instead of an instant retry.
 - If the server asks for a longer pause than `maxRetryDelayMs` (default 60 s),
   the client does not sleep. It throws `CrmRateLimitError` with `retryAfterMs`
   set, and keeps failing fast until the pause is over, so your job queue can
@@ -247,7 +304,7 @@ and carries `provider`. Each message says what to do next.
 
 | Error | When |
 | --- | --- |
-| `CrmValidationError` | bad input or options, before any request (for example a missing `statusName`, an empty `apiKey` or a NaN `maxRetries`) |
+| `CrmValidationError` | bad input or options, before anything is written (for example a missing `statusName`, an empty `apiKey` or a NaN `maxRetries`). Usually no request is sent; Housecall Pro's `createJob` may first read the customer's addresses |
 | `CrmAuthError` | HTTP 401 or 403; the message says where to create a key |
 | `CrmNotFoundError` | HTTP 404 |
 | `CrmRateLimitError` | 429 after retries, or a pause longer than you allow; has `retryAfterMs` |
@@ -264,7 +321,8 @@ provider name, and `new RequestLimiter` does for a bad `minIntervalMs`.
 
 ## Limits and costs
 
-Checked against the vendors' public docs on 2026-11-17.
+Checked against the vendors' public docs on 2026-11-17 (Housecall Pro on
+2026-11-23).
 
 - The library is free (Apache-2.0). Every call runs against your contractor
   customer's own CRM account, using that account's key and limits.
@@ -280,17 +338,25 @@ Checked against the vendors' public docs on 2026-11-17.
 - **JobNimbus** documents no rate limit
   ([API docs](https://documenter.getpostman.com/view/3919598/S11PpG4x)). The
   client still honours `Retry-After` if one arrives.
+- **Housecall Pro** offers API keys to accounts on its MAX plan
+  ([API overview](https://help.housecallpro.com/en/articles/8505035-api-overview);
+  the [developer docs](https://docs.housecallpro.com/) also name the XL plan).
+  An Admin creates the key and chooses Full access or Read-only; creating
+  records needs Full access. The docs say a 429 comes with `RateLimit-Reset`
+  but give no number for the limit. Housecall Pro does not build or support
+  custom API integrations itself.
 - There is no incremental sync yet: `listContacts` reads the whole account (up
   to `maxRecords`) each time.
 
 ## Checked against the vendors' docs
 
-Every endpoint, parameter and field this library sends or reads was checked on
-2026-11-17 against the public
+Every endpoint, parameter and field this library sends or reads was checked
+against the public
 [JobNimbus API documentation](https://documenter.getpostman.com/view/3919598/S11PpG4x)
-and the [AccuLynx API v2 reference](https://apidocs.acculynx.com). None of it has
-been run against a live account. Where the docs are silent or ambiguous, this is
-what the client does.
+and the [AccuLynx API v2 reference](https://apidocs.acculynx.com) on 2026-11-17,
+and the [Housecall Pro public API docs](https://docs.housecallpro.com/docs/housecall-public-api)
+on 2026-11-23. None of it has been run against a live account. Where the docs
+are silent or ambiguous, this is what the client does.
 
 **JobNimbus**
 
@@ -326,6 +392,29 @@ what the client does.
   messages, contact notes). This adapter does not implement them yet.
 - The rate-limit reference and the changelog give different header names
   (`RateLimit-*` and `X-RateLimit-*`). The client relies only on `Retry-After`.
+
+**Housecall Pro**
+
+- `GET /customers` documents a default `page_size` of 10 and no maximum. The
+  client asks for 100 by default (`pageSize` changes it) and stops at the
+  `total_pages` the response reports, so a server that pages smaller still
+  reads everything.
+- "Epoch format" for `RateLimit-Reset` doesn't say seconds or milliseconds.
+  The client reads both, and reads a small number as seconds from now (the
+  meaning IETF drafts of the RateLimit headers gave it), so no form is retried
+  at once.
+- `POST /jobs` needs an `address_id` and has no name or description field, so
+  `createJob` finds or adds the address (see above), saves `description` as the
+  job's notes and rejects `name`.
+- `POST /customers` needs a first name, last name, email or phone; a company
+  name alone is rejected before sending. `phone` is saved as the mobile number.
+- Customers have no status, assigned employee, archived or deleted field, so
+  `status` and `assignedReps` are empty and `includeDeleted` is rejected.
+  `address` is the first service address, else the first address.
+- The date format of `created_at` and `updated_at` isn't stated. The client
+  reads them only if they carry a time zone offset, like every other date here.
+- Notes exist on jobs only (`POST /jobs/{job_id}/notes`, text only). No
+  endpoint lists them with dates, so `listNotes` is unsupported.
 
 Found a mismatch? Open an issue with a link to the vendor doc page.
 
@@ -363,9 +452,10 @@ DCO sign-off, which CI checks on every pull request.
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). JobNimbus and AccuLynx
-are trademarks of their owners, and this project is not affiliated with either.
-See [TRADEMARKS.md](TRADEMARKS.md).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). JobNimbus, AccuLynx
+and Housecall Pro are trademarks of their owners. This project is not
+affiliated with, endorsed by or sponsored by any of them. See
+[TRADEMARKS.md](TRADEMARKS.md).
 
 ## Why we give this away
 

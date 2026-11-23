@@ -32,7 +32,7 @@ const { CRM_PROVIDER: provider, CRM_API_KEY: apiKey } = process.env;
 const rawMax = process.env.CRM_MAX_RECORDS?.trim() || "500";
 
 if (!isCrmProviderName(provider)) {
-  fail(`Set CRM_PROVIDER to "jobnimbus" or "acculynx" (got ${provider ? JSON.stringify(provider) : "nothing"}).`);
+  fail(`Set CRM_PROVIDER to "jobnimbus", "acculynx" or "housecallpro" (got ${provider ? JSON.stringify(provider) : "nothing"}).`);
 }
 if (!apiKey?.trim()) fail(`Set CRM_API_KEY. ${CRM_PROVIDERS[provider].keyHelp}`);
 const maxRecords = Number(rawMax);

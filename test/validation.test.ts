@@ -4,8 +4,8 @@ import {
   CrmValidationError,
   JobNimbusClient,
   type ClientOptions,
-  type CrmContactPayload,
-  type CrmJobPayload,
+  type JobNimbusContactPayload,
+  type JobNimbusJobPayload,
 } from "../src/index.js";
 import { TEST_API_KEY, json, mockFetch } from "./helpers.js";
 
@@ -153,7 +153,7 @@ describe("write payloads from plain JavaScript", () => {
     [{ ...base, skipAutomation: "yes" }, /skipAutomation must be true or false/],
     [{ ...base, assignedRepExternalId: ["r1"] }, /assignedRepExternalId must be a string/],
   ])("createContact rejects %o", async (payload, message) => {
-    await expect(jn().createContact(loose<CrmContactPayload>(payload))).rejects.toThrow(message);
+    await expect(jn().createContact(loose<JobNimbusContactPayload>(payload))).rejects.toThrow(message);
   });
 
   it.each([
@@ -161,7 +161,7 @@ describe("write payloads from plain JavaScript", () => {
     [{ name: "Roof", recordTypeName: "Job", statusName: "Lead", primaryContactExternalId: 7 }, /primaryContactExternalId must be a string/],
     [{ name: "Roof", recordTypeName: "Job" }, /statusName is required/],
   ])("createJob rejects %o", async (payload, message) => {
-    await expect(jn().createJob(loose<CrmJobPayload>(payload))).rejects.toThrow(message);
+    await expect(jn().createJob(loose<JobNimbusJobPayload>(payload))).rejects.toThrow(message);
   });
 
   it("listNotes rejects options that are not an object or a non-boolean includeDeleted", async () => {

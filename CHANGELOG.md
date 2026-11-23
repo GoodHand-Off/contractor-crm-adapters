@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-23
+
+### Added
+
+- Housecall Pro adapter (`HousecallProClient`, provider name `"housecallpro"`):
+  connection test, paginated customer listing, customer creation, job creation
+  for a customer (finding or adding the customer's address), and notes on jobs.
+  It sends `Authorization: Token <key>`. It follows Housecall Pro's public API
+  docs as read on 2026-11-23 and has not been run against a live account.
+- `RateLimit-Reset` in the HTTP layer: after a Housecall Pro 429 the client
+  waits until the reset time the header gives, then retries.
+  `parseRateLimitReset` is exported next to `parseRetryAfter`.
+- `JobNimbusContactPayload`, `JobNimbusJobPayload` and `HousecallProJobPayload`
+  types.
+
+### Changed (breaking)
+
+0.x releases may break the API in a minor version. Each change below is a
+compile-time change only; nothing that worked at runtime stops working.
+
+- `CrmContactPayload.recordTypeName` and `statusName`, and
+  `CrmJobPayload.name`, `recordTypeName` and `statusName`, are now optional,
+  because Housecall Pro has no such fields. JobNimbus still needs them:
+  `JobNimbusClient.createContact` and `createJob` now take
+  `JobNimbusContactPayload` and `JobNimbusJobPayload`, which keep them
+  required at compile time, and a call through `CrmClient` without them still
+  throws `CrmValidationError` naming the field. Code that reads these fields
+  from a `CrmContactPayload` or `CrmJobPayload` now gets `string | undefined`.
+- `CrmProviderName` gains `"housecallpro"`, so an exhaustive `switch` over it
+  needs a new case.
+
+### Notes
+
+- `CrmValidationError` can now follow a read: Housecall Pro's `createJob` reads
+  the customer's addresses before choosing one, and throws without writing
+  anything if the choice is ambiguous.
+
 ## [0.1.0] - 2026-11-17
 
 ### Added

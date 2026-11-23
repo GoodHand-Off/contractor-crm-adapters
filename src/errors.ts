@@ -111,7 +111,7 @@ export class CrmNotFoundError extends CrmHttpError {
 }
 
 /**
- * HTTP 429 (or 503 with `Retry-After`) after the client stopped retrying.
+ * HTTP 429 (or a 503 that says when to come back) after the client stopped retrying.
  * Schedule the work again after {@link CrmRateLimitError.retryAfterMs}.
  */
 export class CrmRateLimitError extends CrmHttpError {
@@ -205,7 +205,11 @@ export class CrmUnsupportedError extends CrmError {
   }
 }
 
-/** The input was rejected before any request was sent. The message names the field. */
+/**
+ * The input was rejected before anything was written. The message names the
+ * field. Usually no request was sent at all; Housecall Pro's `createJob` may
+ * first read the customer's addresses to find the one to use.
+ */
 export class CrmValidationError extends CrmError {}
 
 function display(provider: CrmProviderName): string {

@@ -17,9 +17,11 @@ import { invalid, numberOption, optionalString } from "./validate.js";
 /** Options shared by every client. Only `apiKey` is required. */
 export interface ClientOptions {
   /**
-   * The CRM API key. Sent only as a Bearer token to `baseUrl`. It is kept in
-   * an ES private field, so it never appears in logs, `util.inspect` or
-   * `JSON.stringify` of a client, and never in an error message.
+   * The CRM API key. Sent only in the `Authorization` header to `baseUrl`, in
+   * the form each vendor documents (`Bearer <key>` for JobNimbus and AccuLynx,
+   * `Token <key>` for Housecall Pro). It is kept in an ES private field, so it
+   * never appears in logs, `util.inspect` or `JSON.stringify` of a client, and
+   * never in an error message.
    */
   apiKey: string;
   /** Any fetch-compatible function. Default: `globalThis.fetch`. */
@@ -34,8 +36,8 @@ export interface ClientOptions {
   timeoutMs?: number | undefined;
   /**
    * How many times to retry a request the server rate limited (HTTP 429, or
-   * 503 with `Retry-After`). A whole number from 0 to 10; default 2. Other
-   * failures are never retried.
+   * 503 that says when to come back). A whole number from 0 to 10; default 2.
+   * Other failures are never retried.
    */
   maxRetries?: number | undefined;
   /**
@@ -48,8 +50,8 @@ export interface ClientOptions {
   /**
    * Minimum gap between the start of two requests from this client, in ms
    * (0 to 2,147,483,647). Requests are spaced, not dropped. Defaults to the provider's documented
-   * per-key limit (AccuLynx: 100 ms, i.e. 10 requests per second; JobNimbus:
-   * 0, since it documents none).
+   * per-key limit (AccuLynx: 100 ms, i.e. 10 requests per second; JobNimbus
+   * and Housecall Pro: 0, since neither documents a number).
    */
   minRequestIntervalMs?: number | undefined;
   /**
@@ -74,6 +76,18 @@ export interface CallOptions {
 }
 
 type QueryValue = string | number | boolean | undefined;
+
+/** What an adapter tells the HTTP layer about its vendor. Internal. */
+export interface ProviderDefaults {
+  /** The documented API base URL. */
+  baseUrl: string;
+  /** Default spacing between request starts, in ms. */
+  minRequestIntervalMs: number;
+  /** The word before the key in the `Authorization` header. Default `"Bearer"`. */
+  authScheme?: "Bearer" | "Token";
+  /** Read the wait after a 429 from `RateLimit-Reset` before `Retry-After`. Default `false`. */
+  rateLimitReset?: boolean;
+}
 
 interface HttpRequest {
   method?: "GET" | "POST";
@@ -109,14 +123,14 @@ export class HttpClient {
   readonly #maxRetryDelayMs: number;
   readonly #userAgent: string | undefined;
   readonly #gates: Gate[];
+  readonly #authScheme: "Bearer" | "Token";
+  readonly #rateLimitReset: boolean;
 
-  constructor(
-    provider: CrmProviderName,
-    defaults: { baseUrl: string; minRequestIntervalMs: number },
-    options: ClientOptions,
-  ) {
+  constructor(provider: CrmProviderName, defaults: ProviderDefaults, options: ClientOptions) {
     if (typeof options !== "object" || options === null) invalid(provider, "options must be an object with an apiKey");
     this.#provider = provider;
+    this.#authScheme = defaults.authScheme ?? "Bearer";
+    this.#rateLimitReset = defaults.rateLimitReset === true;
     this.#apiKey = checkApiKey(provider, options.apiKey);
     this.#baseUrl = checkBaseUrl(provider, options.baseUrl ?? defaults.baseUrl);
     const fetchImpl: unknown = options.fetch ?? globalThis.fetch;
@@ -165,7 +179,7 @@ export class HttpClient {
     const method = init.method ?? "GET";
     const url = this.#buildUrl(path, init.query);
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.#apiKey}`,
+      Authorization: `${this.#authScheme} ${this.#apiKey}`,
       Accept: "application/json",
     };
     if (init.body !== undefined) headers["Content-Type"] = "application/json";
@@ -179,7 +193,7 @@ export class HttpClient {
 
       const errorInit: CrmHttpErrorInit = { status: response.status, method, path };
       if (response.text) errorInit.responseBody = response.text.slice(0, BODY_LIMIT);
-      const retryAfterMs = parseRetryAfter(response.retryAfter);
+      const retryAfterMs = this.#serverWait(response);
       const rateLimited = response.status === 429 || (response.status === 503 && retryAfterMs !== undefined);
 
       if (rateLimited) {
@@ -199,6 +213,21 @@ export class HttpClient {
       if (response.status === 404) throw new CrmNotFoundError(this.#provider, errorInit);
       throw new CrmHttpError(this.#provider, errorInit);
     }
+  }
+
+  /**
+   * How long the server asked us to wait, in ms, or `undefined` if it did not
+   * say. Providers that document `RateLimit-Reset` (Housecall Pro) are read
+   * from it first. A reset time that has already passed, as a clock running
+   * ahead of the server's would make it, counts as unsaid, so the retry backs
+   * off instead of firing at once.
+   */
+  #serverWait(response: { retryAfter: string | null; rateLimitReset: string | null }): number | undefined {
+    if (this.#rateLimitReset) {
+      const resetMs = parseRateLimitReset(response.rateLimitReset);
+      if (resetMs !== undefined && resetMs > 0) return resetMs;
+    }
+    return parseRetryAfter(response.retryAfter);
   }
 
   /**
@@ -232,7 +261,7 @@ export class HttpClient {
     init: { method: string; headers: Record<string, string>; body: string | undefined },
     path: string,
     signal: AbortSignal | undefined,
-  ): Promise<{ ok: boolean; status: number; retryAfter: string | null; text: string }> {
+  ): Promise<{ ok: boolean; status: number; retryAfter: string | null; rateLimitReset: string | null; text: string }> {
     signal?.throwIfAborted();
     const controller = new AbortController();
     let timedOut = false;
@@ -248,7 +277,13 @@ export class HttpClient {
       // The timeout covers the whole attempt, headers and body, even if a custom fetch ignores the signal.
       const response = await abortable(this.#fetch(url, fetchInit), controller.signal);
       const text = await abortable(response.text(), controller.signal);
-      return { ok: response.ok, status: response.status, retryAfter: response.headers.get("retry-after"), text };
+      return {
+        ok: response.ok,
+        status: response.status,
+        retryAfter: response.headers.get("retry-after"),
+        rateLimitReset: response.headers.get("ratelimit-reset"),
+        text,
+      };
     } catch (error) {
       if (timedOut) {
         throw new CrmTimeoutError(this.#provider, { timeoutMs: this.#timeoutMs, method: init.method, path });
@@ -302,6 +337,33 @@ export function parseRetryAfter(value: string | null, now: number = Date.now()):
   const date = Date.parse(/^[A-Za-z]{3} [A-Za-z]{3} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(trimmed) ? `${trimmed} GMT` : trimmed);
   if (Number.isNaN(date)) return undefined;
   return Math.max(0, date - now);
+}
+
+/** Unix seconds from 2001-09-09 to 2286-11-20; Unix milliseconds over the same span. */
+const EPOCH_SECONDS = [1e9, 1e10] as const;
+const EPOCH_MILLIS = [1e12, 1e13] as const;
+
+/**
+ * Parse a `RateLimit-Reset` header. Housecall Pro documents it on a 429 as
+ * "the time (in epoch format) that the user rate limit will be reset".
+ *
+ * - Unix seconds (1e9 to 1e10) or Unix milliseconds (1e12 to 1e13) are read as that moment.
+ * - A smaller number is read as seconds from now, the meaning IETF drafts of
+ *   the RateLimit headers gave it, so either form is waited out.
+ *
+ * @param value - The raw header value, or `null` when absent.
+ * @param now - The current time in Unix ms. Default `Date.now()`.
+ * @returns Milliseconds to wait (never negative), or `undefined` when the header is absent or unreadable.
+ */
+export function parseRateLimitReset(value: string | null, now: number = Date.now()): number | undefined {
+  if (value === null) return undefined;
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return undefined;
+  const number = Number(trimmed);
+  if (number < EPOCH_SECONDS[0]) return Math.round(number * 1000);
+  if (number < EPOCH_SECONDS[1]) return Math.max(0, Math.round(number * 1000) - now);
+  if (number >= EPOCH_MILLIS[0] && number < EPOCH_MILLIS[1]) return Math.max(0, Math.round(number) - now);
+  return undefined;
 }
 
 function checkApiKey(provider: CrmProviderName, apiKey: unknown): string {

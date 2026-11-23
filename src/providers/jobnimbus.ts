@@ -8,12 +8,12 @@ import type {
   CrmCapabilities,
   CrmClient,
   CrmContact,
-  CrmContactPayload,
   CrmJobContext,
-  CrmJobPayload,
   CrmNote,
   CreateNoteOptions,
   CustomFieldMappings,
+  JobNimbusContactPayload,
+  JobNimbusJobPayload,
   ListContactsOptions,
   ListNotesOptions,
 } from "../types.js";
@@ -155,7 +155,7 @@ export class JobNimbusClient implements CrmClient {
    *
    * @returns The new contact's `jnid`.
    */
-  async createContact(payload: CrmContactPayload, options: CallOptions = {}): Promise<{ externalId: string }> {
+  async createContact(payload: JobNimbusContactPayload, options: CallOptions = {}): Promise<{ externalId: string }> {
     const input = optionalObject(PROVIDER, payload, "payload") ?? invalid(PROVIDER, "payload is required");
     const firstName = optionalString(PROVIDER, input.firstName, "firstName");
     const lastName = optionalString(PROVIDER, input.lastName, "lastName");
@@ -187,7 +187,7 @@ export class JobNimbusClient implements CrmClient {
    *
    * @returns The new job's `jnid`.
    */
-  async createJob(payload: CrmJobPayload, options: CallOptions = {}): Promise<{ externalId: string }> {
+  async createJob(payload: JobNimbusJobPayload, options: CallOptions = {}): Promise<{ externalId: string }> {
     const input = optionalObject(PROVIDER, payload, "payload") ?? invalid(PROVIDER, "payload is required");
     const primaryId = optionalString(PROVIDER, input.primaryContactExternalId, "primaryContactExternalId");
     const body = compact({
