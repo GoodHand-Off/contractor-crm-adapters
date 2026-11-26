@@ -440,6 +440,11 @@ For what JobNimbus's API, automations and Zapier connector can and can't do,
 in plain terms, see our
 [JobNimbus automation guide](https://goodhandoff.com/blog/jobnimbus-automation-integration?utm_source=github&utm_medium=readme&utm_campaign=contractor-crm-adapters&utm_content=guide#api).
 
+For Housecall Pro, the matching guide covers which plan has the API, how an
+Admin creates a key, what the API reaches and what Pipeline and Zapier already
+do without it:
+[Housecall Pro automation guide](https://goodhandoff.com/blog/housecall-pro-automation-integration?utm_source=github&utm_medium=readme&utm_campaign=contractor-crm-adapters&utm_content=guide-hcp#api).
+
 ## Example script
 
 `examples/rep-report.mjs` is a read-only report: records per status and the
