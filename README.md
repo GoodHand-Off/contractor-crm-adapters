@@ -362,7 +362,7 @@ Every endpoint, parameter and field this library sends or reads was checked
 against the public
 [JobNimbus API documentation](https://documenter.getpostman.com/view/3919598/S11PpG4x)
 and the [AccuLynx API v2 reference](https://apidocs.acculynx.com) on 2026-11-17,
-and the [Housecall Pro public API docs](https://docs.housecallpro.com/docs/housecall-public-api)
+and the [Housecall Pro public API docs](https://docs.housecallpro.com/docs/housecall-public-api/a4ca20a18010c-housecall-v1-api)
 on 2026-11-23. None of it has been run against a live account. Where the docs
 are silent or ambiguous, this is what the client does.
 

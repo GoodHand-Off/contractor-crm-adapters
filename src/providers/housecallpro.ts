@@ -26,7 +26,7 @@ import { collectContacts, readListOptions } from "./shared.js";
 
 /**
  * Housecall Pro public API v1, as documented at
- * https://docs.housecallpro.com/docs/housecall-public-api (read 2026-11-23).
+ * https://docs.housecallpro.com/docs/housecall-public-api/a4ca20a18010c-housecall-v1-api (read 2026-11-23).
  * Paths have no version prefix.
  */
 const BASE_URL = "https://api.housecallpro.com";
